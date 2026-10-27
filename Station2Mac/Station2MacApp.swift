@@ -777,7 +777,7 @@ struct StationSetupView: View {
             Form {
                 Section("Локальное подключение") {
                     TextField("IPv4 Яндекс.Станции", text: $model.stationHost)
-                    Text("Укажи IP Mini 2. Доступ к Mac получит только этот адрес; приложение само установит контроллер через уже включённый ADB.")
+                    Text("Укажи IP Яндекс.Станции. Доступ к Mac получит только этот адрес; приложение само установит контроллер через уже включённый ADB.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 

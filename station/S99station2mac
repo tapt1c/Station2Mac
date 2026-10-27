@@ -1,0 +1,23 @@
+#!/bin/sh
+# Optional init.d hook for rooted stations; requires an installed controller.
+base=/data/opt/mini2mac-voice
+case "$1" in
+  start)
+    if [ -x "$base/restart.sh" ]; then
+      sh "$base/restart.sh" >"$base/startup.log" 2>&1
+    fi
+    ;;
+  stop)
+    if [ -f "$base/stop.sh" ]; then
+      sh "$base/stop.sh"
+    fi
+    ;;
+  restart)
+    "$0" stop
+    "$0" start
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}" >&2
+    exit 1
+    ;;
+esac

@@ -16,17 +16,12 @@ struct Command: Codable, Identifiable, Equatable {
     @Published var shortcuts: [String] = []
     @Published var log: String = "Готово"
     @Published var serverRunning: Bool = false
-    @Published var homeAssistantHost: String = "" { didSet { saveHomeAssistantSettings() } }
-    @Published var homeAssistantEnabled: Bool = false { didSet { saveHomeAssistantSettings() } }
-    @Published private(set) var homeAssistantRunning: Bool = false
     @Published var stationHost: String = "" { didSet { saveStationSettings() } }
     @Published var stationEnabled: Bool = false { didSet { saveStationSettings() } }
     @Published private(set) var stationRunning: Bool = false
     let port: UInt16 = 8765
-    let homeAssistantPort: UInt16 = 8766
     let stationPort: UInt16 = 8767
     private var server: LocalBridgeServer?
-    private var homeAssistantServer: LocalBridgeServer?
     private var stationServer: LocalBridgeServer?
 
     private var applicationSupportFolder: URL {
@@ -36,13 +31,7 @@ struct Command: Codable, Identifiable, Equatable {
         return folder
     }
     private var storage: URL { applicationSupportFolder.appendingPathComponent("commands.json") }
-    private var homeAssistantSettingsStorage: URL { applicationSupportFolder.appendingPathComponent("home-assistant.json") }
     private var stationSettingsStorage: URL { applicationSupportFolder.appendingPathComponent("station.json") }
-
-    private struct HomeAssistantSettings: Codable {
-        var host: String
-        var enabled: Bool
-    }
 
     private struct StationSettings: Codable {
         var host: String
@@ -53,11 +42,6 @@ struct Command: Codable, Identifiable, Equatable {
         if let data = try? Data(contentsOf: storage), let saved = try? JSONDecoder().decode([Command].self, from: data) {
             commands = saved
         }
-        if let data = try? Data(contentsOf: homeAssistantSettingsStorage),
-           let saved = try? JSONDecoder().decode(HomeAssistantSettings.self, from: data) {
-            homeAssistantHost = saved.host
-            homeAssistantEnabled = saved.enabled
-        }
         if let data = try? Data(contentsOf: stationSettingsStorage),
            let saved = try? JSONDecoder().decode(StationSettings.self, from: data) {
             stationHost = saved.host
@@ -65,17 +49,11 @@ struct Command: Codable, Identifiable, Equatable {
         }
         refreshShortcuts()
         startServer()
-        if homeAssistantEnabled { startHomeAssistantLink() }
         if stationEnabled { startStationLink() }
     }
     func save() {
         guard let data = try? JSONEncoder().encode(commands) else { return }
         try? data.write(to: storage, options: .atomic)
-    }
-    func saveHomeAssistantSettings() {
-        let settings = HomeAssistantSettings(host: homeAssistantHost, enabled: homeAssistantEnabled)
-        guard let data = try? JSONEncoder().encode(settings) else { return }
-        try? data.write(to: homeAssistantSettingsStorage, options: .atomic)
     }
     func saveStationSettings() {
         let settings = StationSettings(host: stationHost, enabled: stationEnabled)
@@ -118,57 +96,6 @@ struct Command: Codable, Identifiable, Equatable {
         }
         do { try server.start(); self.server = server; serverRunning = true }
         catch { log = "Сервер не запустился: \(error.localizedDescription)" }
-    }
-
-    func startHomeAssistantLink() {
-        guard homeAssistantServer == nil else { return }
-        let host = homeAssistantHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isValidIPv4Address(host) else {
-            homeAssistantEnabled = false
-            homeAssistantRunning = false
-            log = "Укажи IPv4-адрес Home Assistant"
-            return
-        }
-        do {
-            let token = try HomeAssistantKeychain.token()
-            let server = LocalBridgeServer(
-                port: homeAssistantPort,
-                access: .protectedLAN(allowedPeerIPv4: host, bearerToken: token)
-            ) { [weak self] id in
-                Task { @MainActor in
-                    guard let self, let command = self.commands.first(where: { $0.id.uuidString.lowercased() == id.lowercased() }) else { return }
-                    self.run(command)
-                }
-            }
-            try server.start()
-            homeAssistantServer = server
-            homeAssistantRunning = true
-            homeAssistantEnabled = true
-            log = "Защищённый доступ Home Assistant включён"
-        } catch {
-            homeAssistantEnabled = false
-            homeAssistantRunning = false
-            log = "Home Assistant не подключён: \(error.localizedDescription)"
-        }
-    }
-
-    func stopHomeAssistantLink() {
-        homeAssistantServer?.stop()
-        homeAssistantServer = nil
-        homeAssistantRunning = false
-        homeAssistantEnabled = false
-        log = "Доступ Home Assistant отключён"
-    }
-
-    func copyHomeAssistantToken() {
-        do {
-            let token = try HomeAssistantKeychain.token()
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(token, forType: .string)
-            log = "Ключ Home Assistant скопирован"
-        } catch {
-            log = "Не удалось получить ключ: \(error.localizedDescription)"
-        }
     }
 
     func startStationLink() {
@@ -593,53 +520,6 @@ final class LocalBridgeServer {
     }
 }
 
-enum HomeAssistantKeychain {
-    private static let service = "Mini2MacBridge"
-    private static let account = "home-assistant-bearer-token"
-
-    static func token() throws -> String {
-        if let existing = read() { return existing }
-
-        var bytes = [UInt8](repeating: 0, count: 32)
-        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
-            throw KeychainError.unavailable
-        }
-        let generated = Data(bytes).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: Data(generated.utf8),
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
-        ]
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else { throw KeychainError.unavailable }
-        return generated
-    }
-
-    private static func read() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-
-    enum KeychainError: LocalizedError {
-        case unavailable
-        var errorDescription: String? { "Не удалось сохранить ключ в Связке ключей macOS" }
-    }
-}
-
 enum StationKeychain {
     private static let service = "Mini2MacBridge"
     private static let account = "station-bearer-token"
@@ -724,50 +604,6 @@ enum LocalNetwork {
     }
 }
 
-struct HomeAssistantSetupView: View {
-    @ObservedObject var model: BridgeModel
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Защищённое подключение") {
-                    TextField("IPv4 Home Assistant", text: $model.homeAssistantHost)
-                    Text("Укажи IP виртуальной машины Home Assistant из UTM. Разрешения получит только этот адрес.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    if model.homeAssistantRunning {
-                        Label("Защищённый доступ включён", systemImage: "checkmark.shield.fill")
-                            .foregroundStyle(.green)
-                        Button("Отключить доступ", role: .destructive) { model.stopHomeAssistantLink() }
-                    } else {
-                        Button("Включить защищённый доступ") { model.startHomeAssistantLink() }
-                    }
-                }
-
-                Section("Данные для Home Assistant") {
-                    let macIP = LocalNetwork.preferredIPv4Address() ?? "IP_ЭТОГО_MAC"
-                    Text("URL: http://\(macIP):\(model.homeAssistantPort)/run/UUID")
-                        .textSelection(.enabled)
-                    Text("Запросы принимаются только с указанного IP и только с ключом Bearer.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Button("Скопировать ключ доступа") { model.copyHomeAssistantToken() }
-                }
-
-                Section("Важно") {
-                    Text("Не делай проброс портов 8765 или 8766 на роутере и не добавляй их в туннели. Этот доступ только для Home Assistant в твоей домашней сети.")
-                        .font(.caption)
-                }
-            }
-            .navigationTitle("Home Assistant")
-            .toolbar { Button("Готово") { dismiss() } }
-        }
-        .frame(width: 540, height: 430)
-    }
-}
-
 struct StationSetupView: View {
     @ObservedObject var model: BridgeModel
     @Environment(\.dismiss) private var dismiss
@@ -814,7 +650,6 @@ struct StationSetupView: View {
 struct ContentView: View {
     @StateObject private var model = BridgeModel()
     @State private var selected: UUID?
-    @State private var showingHomeAssistantSetup = false
     @State private var showingStationSetup = false
     var body: some View {
         NavigationSplitView {
@@ -872,12 +707,8 @@ struct ContentView: View {
                 Text("Локальный мост: 127.0.0.1:\(model.port)")
                 Spacer()
                 Button("Станция…") { showingStationSetup = true }
-                Button("Home Assistant…") { showingHomeAssistantSetup = true }
                 Text(model.log).lineLimit(1)
             }.font(.caption).padding(10).background(.bar)
-        }
-        .sheet(isPresented: $showingHomeAssistantSetup) {
-            HomeAssistantSetupView(model: model)
         }
         .sheet(isPresented: $showingStationSetup) {
             StationSetupView(model: model)

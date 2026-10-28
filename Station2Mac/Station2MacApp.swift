@@ -134,7 +134,7 @@ struct Command: Codable, Identifiable, Equatable {
         guard isValidIPv4Address(host) else {
             stationEnabled = false
             stationRunning = false
-            log = "Укажи IPv4-адрес Яндекс.Станции"
+            reportStationError(title: "Некорректный адрес Станции", detail: "Укажи IPv4-адрес Яндекс.Станции")
             return
         }
         do {
@@ -159,7 +159,7 @@ struct Command: Codable, Identifiable, Equatable {
         } catch {
             stationEnabled = false
             stationRunning = false
-            log = "Станция не подключена: \(error.localizedDescription)"
+            reportStationError(title: connectionErrorTitle, detail: error.localizedDescription)
         }
     }
 
@@ -171,7 +171,10 @@ struct Command: Codable, Identifiable, Equatable {
         stationEnabled = false
         let connection: StationConnection
         do { connection = try stationConnection() }
-        catch { log = "Доступ к Mac закрыт: \(error.localizedDescription)"; return }
+        catch {
+            reportStationError(title: "Не удалось остановить контроллер", detail: "Доступ к Mac закрыт. \(error.localizedDescription)")
+            return
+        }
         stationBusy = true
         DispatchQueue.global(qos: .utility).async {
             do {
@@ -184,7 +187,7 @@ struct Command: Codable, Identifiable, Equatable {
                 let message = error.localizedDescription
                 DispatchQueue.main.async {
                     self.stationBusy = false
-                    self.log = "Доступ к Mac закрыт, но контроллер на Станции не остановлен: \(message)"
+                    self.reportStationError(title: "Не удалось остановить контроллер", detail: "Доступ к Mac закрыт, но контроллер на Станции не остановлен.\n\n\(message)")
                 }
             }
         }
@@ -202,14 +205,14 @@ struct Command: Codable, Identifiable, Equatable {
             log = "Синхронизирую фразы со Станцией…"
             deployStationController(host: host, token: token)
         } catch {
-            log = "Не удалось подготовить ключ Станции: \(error.localizedDescription)"
+            reportStationError(title: "Не удалось подготовить ключ Станции", detail: error.localizedDescription)
         }
     }
 
     private func deployStationController(host: String, token: String) {
         let connection: StationConnection
         do { connection = try stationConnection() }
-        catch { log = error.localizedDescription; return }
+        catch { reportStationError(title: connectionErrorTitle, detail: error.localizedDescription); return }
         let commands = commands.flatMap { command -> [String] in
             let phrase = command.phrase.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !phrase.isEmpty, !command.shortcut.isEmpty,
@@ -220,7 +223,7 @@ struct Command: Codable, Identifiable, Equatable {
         }.joined(separator: "\n") + "\n"
         let macHost = LocalNetwork.preferredIPv4Address() ?? ""
         guard isValidIPv4Address(macHost) else {
-            log = "Не удалось определить IP этого Mac"
+            reportStationError(title: "Нет адреса для подключения", detail: "Не удалось определить IP этого Mac. Проверь подключение к домашней сети.")
             return
         }
 
@@ -268,10 +271,19 @@ struct Command: Codable, Identifiable, Equatable {
                     self.stationServer = nil
                     self.stationRunning = false
                     self.stationEnabled = false
-                    self.log = "Не удалось настроить Станцию: \(message)"
+                    self.reportStationError(title: self.connectionErrorTitle, detail: message)
                 }
             }
         }
+    }
+
+    private var connectionErrorTitle: String {
+        stationTransport == .ssh ? "Не удалось подключиться по SSH" : "Не удалось подключиться по ADB"
+    }
+
+    private func reportStationError(title: String, detail: String) {
+        log = "\(title): \(detail)"
+        StationErrorPresenter.show(title: title, detail: detail)
     }
 
     private nonisolated static let stationDirectory = "/data/opt/mini2mac-voice"
@@ -665,79 +677,191 @@ struct StationSetupView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("Локальное подключение") {
-                    Group {
-                        Picker("Подключение", selection: $model.stationTransport) {
-                            ForEach(StationTransport.allCases, id: \.rawValue) { transport in
-                                Text(transport.title).tag(transport)
-                            }
-                        }
-                        TextField("IPv4 Яндекс.Станции", text: $model.stationHost)
-                        if model.stationTransport == .ssh {
-                            TextField("Пользователь SSH", text: $model.stationSSHUser)
-                            TextField("Порт SSH", text: $model.stationSSHPort)
-                            Picker("Вход по SSH", selection: $model.stationSSHAuthentication) {
-                                ForEach(StationSSHAuthentication.allCases, id: \.rawValue) { method in
-                                    Text(method.title).tag(method)
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: "hifispeaker.fill")
+                    .font(.system(size: 25))
+                    .foregroundStyle(.tint)
+                    .frame(width: 44, height: 44)
+                    .background(.tint.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Яндекс.Станция").font(.title2.bold())
+                    Text("Подключение и голосовое управление Mac")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(24)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 16) {
+                            VStack(alignment: .leading, spacing: 14) {
+                                field("Способ подключения") {
+                                    Picker("Способ подключения", selection: $model.stationTransport) {
+                                        ForEach(StationTransport.allCases, id: \.rawValue) { transport in
+                                            Text(transport.title).tag(transport)
+                                        }
+                                    }
+                                    .pickerStyle(.segmented)
+                                    .labelsHidden()
+                                }
+                                field("IP-адрес Станции") {
+                                    TextField("Например, 192.168.1.10", text: $model.stationHost)
+                                        .accessibilityLabel("IP-адрес Станции")
+                                }
+
+                                if model.stationTransport == .ssh {
+                                    HStack(alignment: .top, spacing: 14) {
+                                        field("Пользователь") {
+                                            TextField("root", text: $model.stationSSHUser)
+                                                .accessibilityLabel("Пользователь SSH")
+                                        }
+                                        field("Порт") {
+                                            TextField("22", text: $model.stationSSHPort)
+                                                .accessibilityLabel("Порт SSH")
+                                        }
+                                        .frame(width: 105)
+                                    }
+                                    field("Способ входа") {
+                                        Picker("Способ входа", selection: $model.stationSSHAuthentication) {
+                                            ForEach(StationSSHAuthentication.allCases, id: \.rawValue) { method in
+                                                Text(method.title).tag(method)
+                                            }
+                                        }
+                                        .labelsHidden()
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                    if model.stationSSHAuthentication == .key {
+                                        field("SSH-ключ · необязательно") {
+                                            TextField("~/.ssh/id_ed25519", text: $model.stationSSHIdentity)
+                                                .accessibilityLabel("Путь к SSH-ключу")
+                                        }
+                                    } else if model.stationSSHAuthentication == .password {
+                                        field("Пароль SSH") {
+                                            SecureField("Пароль пользователя Станции", text: $model.stationSSHPassword)
+                                                .accessibilityLabel("Пароль SSH")
+                                        }
+                                    }
                                 }
                             }
-                            if model.stationSSHAuthentication == .key {
-                                TextField("Путь к SSH-ключу (необязательно)", text: $model.stationSSHIdentity)
-                            } else if model.stationSSHAuthentication == .password {
-                                SecureField("Пароль SSH", text: $model.stationSSHPassword)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(model.stationRunning || model.stationBusy)
+
+                            if model.stationTransport == .ssh {
+                                hint(sshHint)
                             }
+                            if model.stationRunning && !model.stationBusy {
+                                hint("Чтобы изменить подключение, сначала отключи контроллер.")
+                            }
+
+                            Divider()
+                            connectionStatus
+                            HStack(spacing: 10) {
+                                if model.stationRunning {
+                                    Button("Синхронизировать фразы") { model.synchronizeStationPhrases() }
+                                        .buttonStyle(.borderedProminent)
+                                    Spacer(minLength: 8)
+                                    Button("Отключить", role: .destructive) { model.stopStationLink() }
+                                } else {
+                                    Button("Подключить Станцию") { model.startStationLink() }
+                                        .buttonStyle(.borderedProminent)
+                                }
+                            }
+                            .disabled(model.stationBusy)
                         }
-                    }
-                    .disabled(model.stationRunning || model.stationBusy)
-                    Text("Доступ к Mac получит только этот IP. Приложение установит контроллер через выбранное подключение. Чтобы изменить подключение, сначала отключи контроллер.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if model.stationTransport == .ssh {
-                        Text("При первом SSH-подключении проверь вход в Терминале и подтверди ключ хоста. Для «Без пароля» сервер должен разрешать вход с пустым паролем или без авторизации. В режиме ключа используются стандартные ключи и ~/.ssh/config; ключ с паролем предварительно загрузи через ssh-add. Пароль из приложения хранится только в памяти до его закрытия.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    } label: {
+                        Label("Подключение", systemImage: "network")
+                            .font(.headline)
                     }
 
-                    if model.stationBusy {
-                        ProgressView("Подключение к Станции…")
+                    GroupBox {
+                        Text(model.log)
+                            .font(.callout)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                    } label: {
+                        Label("Состояние", systemImage: "info.circle")
+                            .font(.headline)
                     }
 
-                    if model.stationRunning {
-                        Label("Локальный голосовой контроллер включён", systemImage: "checkmark.shield.fill")
-                            .foregroundStyle(.green)
-                        Button("Синхронизировать фразы") { model.synchronizeStationPhrases() }
-                            .disabled(model.stationBusy)
-                        Button("Отключить контроллер", role: .destructive) { model.stopStationLink() }
-                            .disabled(model.stationBusy)
-                    } else {
-                        Button("Включить локальное управление") { model.startStationLink() }
-                            .disabled(model.stationBusy)
+                    DisclosureGroup("Как пользоваться") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            hint("Добавь команду, выбери Shortcut и укажи фразу, например «Включи Телеграм на Маке». Затем синхронизируй фразы и скажи: «Алиса, включи Телеграм на Маке».")
+                            hint("Контроллер читает распознанные фразы из журнала Станции. Распознавание речи выполняет Алиса через сервисы Яндекса.")
+                        }
+                        .padding(.top, 8)
+                    }
+
+                    DisclosureGroup("Доступ и безопасность") {
+                        hint("Доступ к Mac получит только указанный IP и только с ключом доступа на порту 8767. Не открывай этот порт на роутере и не добавляй его в туннели.")
+                            .padding(.top, 8)
                     }
                 }
-
-                Section("Как пользоваться") {
-                    Text("Заполни в каждой команде фразу по-русски, например «Открой Телеграм», затем синхронизируй. Говори: «Алиса, открой Телеграм».")
-                        .font(.caption)
-                    Text("Станция считывает только уже распознанные Алисой фразы из своего локального журнала; ключ остаётся в домашней сети. Распознавание речи по-прежнему выполняет Алиса через сервисы Яндекса.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Состояние") {
-                    Text(model.log).font(.caption).textSelection(.enabled)
-                }
-
-                Section("Безопасность") {
-                    Text("Mac принимает только авторизованные запросы с IP этой Станции на порту 8767. Не открывай этот порт на роутере и не добавляй его в туннели.")
-                        .font(.caption)
-                }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .navigationTitle("Яндекс.Станция")
-            .toolbar { Button("Готово") { dismiss() } }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Divider()
+            HStack {
+                Spacer()
+                Button("Готово") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
         }
-        .frame(width: 600, height: 640)
+        .frame(width: 600, height: 660)
+    }
+
+    @ViewBuilder private var connectionStatus: some View {
+        if model.stationBusy {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Выполняется операция…").font(.callout)
+            }
+        } else if model.stationRunning {
+            Label("Контроллер подключён", systemImage: "checkmark.circle.fill")
+                .font(.callout).foregroundStyle(.green)
+        } else {
+            Label("Станция не подключена", systemImage: "circle")
+                .font(.callout).foregroundStyle(.secondary)
+        }
+    }
+
+    private var sshHint: String {
+        switch model.stationSSHAuthentication {
+        case .none:
+            return "Станция должна разрешать вход без пароля. При первом подключении подтверди ключ хоста через Терминал."
+        case .key:
+            return "Можно использовать стандартный ключ или ssh-agent. Ключ с паролем предварительно загрузи через ssh-add. При первом подключении подтверди ключ хоста в Терминале."
+        case .password:
+            return "Пароль хранится только до закрытия приложения. При первом подключении подтверди ключ хоста через Терминал."
+        }
+    }
+
+    private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.subheadline.weight(.medium))
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func hint(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

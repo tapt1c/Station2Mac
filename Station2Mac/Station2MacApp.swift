@@ -18,6 +18,13 @@ struct Command: Codable, Identifiable, Equatable {
     @Published var serverRunning: Bool = false
     @Published var stationHost: String = "" { didSet { saveStationSettings() } }
     @Published var stationEnabled: Bool = false { didSet { saveStationSettings() } }
+    @Published var stationTransport: StationTransport = .adb { didSet { saveStationSettings() } }
+    @Published var stationSSHUser: String = "root" { didSet { saveStationSettings() } }
+    @Published var stationSSHPort: String = "22" { didSet { saveStationSettings() } }
+    @Published var stationSSHIdentity: String = "" { didSet { saveStationSettings() } }
+    @Published var stationSSHAuthentication: StationSSHAuthentication = .none { didSet { saveStationSettings() } }
+    @Published var stationSSHPassword: String = ""
+    @Published private(set) var stationBusy: Bool = false
     @Published private(set) var stationRunning: Bool = false
     let port: UInt16 = 8765
     let stationPort: UInt16 = 8767
@@ -36,6 +43,11 @@ struct Command: Codable, Identifiable, Equatable {
     private struct StationSettings: Codable {
         var host: String
         var enabled: Bool
+        var transport: StationTransport?
+        var sshUser: String?
+        var sshPort: String?
+        var sshIdentity: String?
+        var sshAuthentication: StationSSHAuthentication?
     }
 
     init() {
@@ -46,17 +58,31 @@ struct Command: Codable, Identifiable, Equatable {
            let saved = try? JSONDecoder().decode(StationSettings.self, from: data) {
             stationHost = saved.host
             stationEnabled = saved.enabled
+            stationTransport = saved.transport ?? .adb
+            stationSSHUser = saved.sshUser ?? "root"
+            stationSSHPort = saved.sshPort ?? "22"
+            stationSSHIdentity = saved.sshIdentity ?? ""
+            stationSSHAuthentication = saved.sshAuthentication ?? .none
         }
         refreshShortcuts()
         startServer()
-        if stationEnabled { startStationLink() }
+        if stationEnabled {
+            if stationTransport == .ssh, stationSSHAuthentication == .password {
+                stationEnabled = false
+                log = "Введи пароль SSH в настройках Станции и включи подключение"
+            } else {
+                startStationLink()
+            }
+        }
     }
     func save() {
         guard let data = try? JSONEncoder().encode(commands) else { return }
         try? data.write(to: storage, options: .atomic)
     }
     func saveStationSettings() {
-        let settings = StationSettings(host: stationHost, enabled: stationEnabled)
+        let settings = StationSettings(host: stationHost, enabled: stationEnabled, transport: stationTransport,
+                                       sshUser: stationSSHUser, sshPort: stationSSHPort, sshIdentity: stationSSHIdentity,
+                                       sshAuthentication: stationSSHAuthentication)
         guard let data = try? JSONEncoder().encode(settings) else { return }
         try? data.write(to: stationSettingsStorage, options: .atomic)
     }
@@ -99,6 +125,7 @@ struct Command: Codable, Identifiable, Equatable {
     }
 
     func startStationLink() {
+        guard !stationBusy else { return }
         guard stationServer == nil else {
             synchronizeStationPhrases()
             return
@@ -111,6 +138,7 @@ struct Command: Codable, Identifiable, Equatable {
             return
         }
         do {
+            _ = try stationConnection()
             let token = try StationKeychain.token()
             let server = LocalBridgeServer(
                 port: stationPort,
@@ -136,22 +164,34 @@ struct Command: Codable, Identifiable, Equatable {
     }
 
     func stopStationLink() {
+        guard !stationBusy else { return }
         stationServer?.stop()
         stationServer = nil
         stationRunning = false
         stationEnabled = false
-        let host = stationHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isValidIPv4Address(host) else {
-            log = "Локальный голосовой контроллер отключён"
-            return
-        }
+        let connection: StationConnection
+        do { connection = try stationConnection() }
+        catch { log = "Доступ к Mac закрыт: \(error.localizedDescription)"; return }
+        stationBusy = true
         DispatchQueue.global(qos: .utility).async {
-            _ = try? Self.runADB(host: host, arguments: ["shell", "sh", "\(Self.stationDirectory)/stop.sh"])
-            DispatchQueue.main.async { self.log = "Локальный голосовой контроллер отключён" }
+            do {
+                _ = try connection.shell(["sh", "\(Self.stationDirectory)/stop.sh"])
+                DispatchQueue.main.async {
+                    self.stationBusy = false
+                    self.log = "Локальный голосовой контроллер отключён"
+                }
+            } catch {
+                let message = error.localizedDescription
+                DispatchQueue.main.async {
+                    self.stationBusy = false
+                    self.log = "Доступ к Mac закрыт, но контроллер на Станции не остановлен: \(message)"
+                }
+            }
         }
     }
 
     func synchronizeStationPhrases() {
+        guard !stationBusy else { return }
         let host = stationHost.trimmingCharacters(in: .whitespacesAndNewlines)
         guard stationRunning, isValidIPv4Address(host) else {
             log = "Сначала включи подключение к Станции"
@@ -167,6 +207,9 @@ struct Command: Codable, Identifiable, Equatable {
     }
 
     private func deployStationController(host: String, token: String) {
+        let connection: StationConnection
+        do { connection = try stationConnection() }
+        catch { log = error.localizedDescription; return }
         let commands = commands.flatMap { command -> [String] in
             let phrase = command.phrase.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !phrase.isEmpty, !command.shortcut.isEmpty,
@@ -190,28 +233,43 @@ struct Command: Codable, Identifiable, Equatable {
         let restartURL = temporaryFolder.appendingPathComponent("restart.sh")
         let stopURL = temporaryFolder.appendingPathComponent("stop.sh")
 
+        stationBusy = true
         DispatchQueue.global(qos: .userInitiated).async {
             defer { try? FileManager.default.removeItem(at: temporaryFolder) }
             do {
-                try FileManager.default.createDirectory(at: temporaryFolder, withIntermediateDirectories: true)
+                try FileManager.default.createDirectory(at: temporaryFolder, withIntermediateDirectories: true,
+                                                        attributes: [.posixPermissions: 0o700])
                 try Data(Self.stationWatcher.utf8).write(to: watcherURL, options: .atomic)
                 try Data(config.utf8).write(to: configURL, options: .atomic)
                 try Data(commands.utf8).write(to: commandsURL, options: .atomic)
                 try Data(Self.stationStartScript.utf8).write(to: restartURL, options: .atomic)
                 try Data(Self.stationStopScript.utf8).write(to: stopURL, options: .atomic)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: commandsURL.path)
 
-                _ = try Self.runADB(host: host, arguments: ["shell", "mkdir", "-p", Self.stationDirectory])
-                _ = try Self.runADB(host: host, arguments: ["push", watcherURL.path, "\(Self.stationDirectory)/watcher.sh"])
-                _ = try Self.runADB(host: host, arguments: ["push", configURL.path, "\(Self.stationDirectory)/controller.conf"])
-                _ = try Self.runADB(host: host, arguments: ["push", commandsURL.path, "\(Self.stationDirectory)/commands.tsv"])
-                _ = try Self.runADB(host: host, arguments: ["push", restartURL.path, "\(Self.stationDirectory)/restart.sh"])
-                _ = try Self.runADB(host: host, arguments: ["push", stopURL.path, "\(Self.stationDirectory)/stop.sh"])
-                _ = try Self.runADB(host: host, arguments: ["shell", "chmod", "700", "\(Self.stationDirectory)/watcher.sh", "\(Self.stationDirectory)/restart.sh", "\(Self.stationDirectory)/stop.sh"])
-                _ = try Self.runADB(host: host, arguments: ["shell", "chmod", "600", "\(Self.stationDirectory)/controller.conf", "\(Self.stationDirectory)/commands.tsv"])
-                _ = try Self.runADB(host: host, arguments: ["shell", "sh", "\(Self.stationDirectory)/restart.sh"])
-                DispatchQueue.main.async { self.log = "Станция слушает настроенные фразы" }
+                try connection.prepare()
+                _ = try connection.shell(["mkdir", "-p", Self.stationDirectory])
+                _ = try connection.shell(["chmod", "700", Self.stationDirectory])
+                for file in [watcherURL, configURL, commandsURL, restartURL, stopURL] {
+                    try connection.upload(file, to: "\(Self.stationDirectory)/\(file.lastPathComponent)")
+                }
+                _ = try connection.shell(["chmod", "700", "\(Self.stationDirectory)/watcher.sh", "\(Self.stationDirectory)/restart.sh", "\(Self.stationDirectory)/stop.sh"])
+                _ = try connection.shell(["chmod", "600", "\(Self.stationDirectory)/controller.conf", "\(Self.stationDirectory)/commands.tsv"])
+                _ = try connection.shell(["sh", "\(Self.stationDirectory)/restart.sh"])
+                DispatchQueue.main.async {
+                    self.stationBusy = false
+                    self.log = "Станция слушает настроенные фразы (\(connection.transport.title))"
+                }
             } catch {
-                DispatchQueue.main.async { self.log = "Не удалось настроить Станцию: \(error.localizedDescription)" }
+                let message = error.localizedDescription
+                DispatchQueue.main.async {
+                    self.stationBusy = false
+                    self.stationServer?.stop()
+                    self.stationServer = nil
+                    self.stationRunning = false
+                    self.stationEnabled = false
+                    self.log = "Не удалось настроить Станцию: \(message)"
+                }
             }
         }
     }
@@ -320,22 +378,20 @@ struct Command: Codable, Identifiable, Equatable {
     done < "$pipe"
     """#
 
-    private nonisolated static func runADB(host: String, arguments: [String]) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/adb")
-        process.arguments = ["-s", "\(host):5555"] + arguments
-        let output = Pipe()
-        let error = Pipe()
-        process.standardOutput = output
-        process.standardError = error
-        try process.run()
-        process.waitUntilExit()
-        let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let errorText = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        guard process.terminationStatus == 0 else {
-            throw NSError(domain: "Mini2MacBridge.ADB", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorText.isEmpty ? text : errorText])
+    private func stationConnection() throws -> StationConnection {
+        let port = Int(stationSSHPort.trimmingCharacters(in: .whitespacesAndNewlines))
+        if stationTransport == .ssh, port == nil {
+            throw StationConnectionError("Укажи числовой порт SSH от 1 до 65535")
         }
-        return text
+        return try StationConnection(
+            transport: stationTransport,
+            host: stationHost.trimmingCharacters(in: .whitespacesAndNewlines),
+            user: stationSSHUser.trimmingCharacters(in: .whitespacesAndNewlines),
+            port: port ?? 22,
+            identityFile: stationSSHIdentity.trimmingCharacters(in: .whitespacesAndNewlines),
+            authentication: stationSSHAuthentication,
+            password: stationSSHPassword
+        )
     }
 
     private func isValidIPv4Address(_ value: String) -> Bool {
@@ -612,18 +668,52 @@ struct StationSetupView: View {
         NavigationStack {
             Form {
                 Section("Локальное подключение") {
-                    TextField("IPv4 Яндекс.Станции", text: $model.stationHost)
-                    Text("Укажи IP Яндекс.Станции. Доступ к Mac получит только этот адрес; приложение само установит контроллер через уже включённый ADB.")
+                    Group {
+                        Picker("Подключение", selection: $model.stationTransport) {
+                            ForEach(StationTransport.allCases, id: \.rawValue) { transport in
+                                Text(transport.title).tag(transport)
+                            }
+                        }
+                        TextField("IPv4 Яндекс.Станции", text: $model.stationHost)
+                        if model.stationTransport == .ssh {
+                            TextField("Пользователь SSH", text: $model.stationSSHUser)
+                            TextField("Порт SSH", text: $model.stationSSHPort)
+                            Picker("Вход по SSH", selection: $model.stationSSHAuthentication) {
+                                ForEach(StationSSHAuthentication.allCases, id: \.rawValue) { method in
+                                    Text(method.title).tag(method)
+                                }
+                            }
+                            if model.stationSSHAuthentication == .key {
+                                TextField("Путь к SSH-ключу (необязательно)", text: $model.stationSSHIdentity)
+                            } else if model.stationSSHAuthentication == .password {
+                                SecureField("Пароль SSH", text: $model.stationSSHPassword)
+                            }
+                        }
+                    }
+                    .disabled(model.stationRunning || model.stationBusy)
+                    Text("Доступ к Mac получит только этот IP. Приложение установит контроллер через выбранное подключение. Чтобы изменить подключение, сначала отключи контроллер.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if model.stationTransport == .ssh {
+                        Text("При первом SSH-подключении проверь вход в Терминале и подтверди ключ хоста. Для «Без пароля» сервер должен разрешать вход с пустым паролем или без авторизации. В режиме ключа используются стандартные ключи и ~/.ssh/config; ключ с паролем предварительно загрузи через ssh-add. Пароль из приложения хранится только в памяти до его закрытия.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if model.stationBusy {
+                        ProgressView("Подключение к Станции…")
+                    }
 
                     if model.stationRunning {
                         Label("Локальный голосовой контроллер включён", systemImage: "checkmark.shield.fill")
                             .foregroundStyle(.green)
                         Button("Синхронизировать фразы") { model.synchronizeStationPhrases() }
+                            .disabled(model.stationBusy)
                         Button("Отключить контроллер", role: .destructive) { model.stopStationLink() }
+                            .disabled(model.stationBusy)
                     } else {
                         Button("Включить локальное управление") { model.startStationLink() }
+                            .disabled(model.stationBusy)
                     }
                 }
 
@@ -635,6 +725,10 @@ struct StationSetupView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("Состояние") {
+                    Text(model.log).font(.caption).textSelection(.enabled)
+                }
+
                 Section("Безопасность") {
                     Text("Mac принимает только авторизованные запросы с IP этой Станции на порту 8767. Не открывай этот порт на роутере и не добавляй его в туннели.")
                         .font(.caption)
@@ -643,7 +737,7 @@ struct StationSetupView: View {
             .navigationTitle("Яндекс.Станция")
             .toolbar { Button("Готово") { dismiss() } }
         }
-        .frame(width: 560, height: 450)
+        .frame(width: 600, height: 640)
     }
 }
 

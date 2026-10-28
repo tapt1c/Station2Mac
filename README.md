@@ -23,21 +23,20 @@
 
 # Настройка
 Дадада, вы можете вопросом задаться: "а где блядь бинарник то"
+
 Ответ: бинарника нет ибо все построено на shell-скриптах
 
-Перед началом, подключитесь через ADB к вашей колонке
+В приложении есть два типа подключения ADB и SSH, выбирайте какой вам удобнее.
 
-После того как вы запустите приложение, оно вас попросит ввести логин от вашего локального аккаунта
+Настройка подключения делается через кнопку "Станция..."
+<img width="2232" height="1288" alt="CleanShot 2026-10-28 at 2 27 26 PM@2x" src="https://github.com/user-attachments/assets/b74f7168-fe64-4ef1-9dd4-93f88d02f030" />
 
-<img width="1180" height="684" alt="CleanShot 2026-10-27 at 12 52 16 PM@2x" src="https://github.com/user-attachments/assets/8a7f57dc-ac8e-4712-b7de-f993b054bda1" />
+И там уже выбираете способ подключения на ваш вкус
+<img width="1190" height="890" alt="CleanShot 2026-10-28 at 2 28 02 PM@2x" src="https://github.com/user-attachments/assets/8c1d8599-e83c-4428-8eed-9876694c1823" />
+<img width="1186" height="1164" alt="CleanShot 2026-10-28 at 2 28 36 PM@2x" src="https://github.com/user-attachments/assets/58ad5c78-2d16-4b63-a49e-d1b072ae4942" />
 
-Далее в самом приложении вам нужно нажать на кнопку "Станция..."
 
-<img width="2196" height="1564" alt="CleanShot 2026-10-27 at 1 13 00 PM@2x" src="https://github.com/user-attachments/assets/6a4e218d-3236-42ca-aa1d-eab81133ddb8" />
 
-И ввести IP адрес вашей колонки:
-
-<img width="1132" height="442" alt="CleanShot 2026-10-27 at 1 13 54 PM@2x" src="https://github.com/user-attachments/assets/1b979c73-08f9-48f8-87e3-5ba8c58c25e7" />
 
 Готово, мост настроен и все shell-скрипты для управления шорткатами установлены на самой Станции.
 Дальше, добавляете шорткат в само приложение, пишите фразу (желательно с большой буквы), и синхронизируете фразы в том же меню "Станция..."
